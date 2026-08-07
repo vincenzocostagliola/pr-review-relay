@@ -183,7 +183,7 @@ Flags:
 | `--reviewers a,b,c` | Which agents review. Default: `claude,codex,cursor,antigravity`. `opencode` and `qwen` are supported but opt-in — name them explicitly to include them. |
 | `--context-file <path>` | Prepend a document (docs, spec, API reference) to every reviewer's prompt — they read it and verify the PR against it. Great for "check this against the official docs". |
 | `--link` *(default)* | Reviewers read the changed files for context and review the embedded diff. When the relay runs from the PR's own checkout **and** that checkout is the PR head and clean, they read the files straight off local disk — no `gh` round-trips (the speed win, since each `gh` an agentic reviewer runs is an LLM call). Otherwise they fetch the files via `gh pr view`/`gh pr diff`. Either way the diff itself comes from `gh pr diff` (authoritative — matches GitHub, correct for forks). The diff is embedded as a fallback so a reviewer whose sandbox can't run `gh` still reviews something — **but only when it's under `LINK_DIFF_FALLBACK_MAX_BYTES` (default 100000)**; above that it's omitted so a huge inline diff can't blow past an agent's prompt limit. |
-| `--diff` | Older behaviour: pipe the raw diff to each reviewer instead of a PR link. |
+| `--diff` | Older behaviour: send the diff itself instead of a PR link. No longer the *raw* diff on stdin — reviewers get one document, the prompt with the diff fenced inside it, which is the same shape `--link` sends. See [how the prompt reaches each reviewer](#how-the-prompt-reaches-each-reviewer). |
 | `--parallel` | Run the reviewers concurrently. |
 | `--dry-run` | Resolve the PR + diff and list reviewers, without invoking agents or posting. |
 | `--max-rounds N` | Hard cap on review rounds per PR (default `3`, or `$PR_RELAY_MAX_ROUNDS`). |
@@ -197,6 +197,39 @@ Environment:
 | `PR_RELAY_AGENT_TIMEOUT` | Per-reviewer timeout in seconds. Default: `300`. Also handed to `agy` as `--print-timeout`, because it enforces its own wait (default 5m) on top of ours — left unset, that inner limit wins whenever you raise this one, and the round dies with `timeout waiting for response` no matter how high you set it. The outer `timeout` gets a few seconds of grace so agy reaches its own limit first and gets to say so. Whether the other reviewers have internal waits of their own has not been checked. |
 | `PR_RELAY_OPENCODE_MODEL` | Model for the `opencode` reviewer, e.g. `opencode/nemotron-3-ultra-free`. **Unset by default** — opencode then uses your own configured model. See the caveat below before pinning one. |
 | `PR_RELAY_OPENCODE_ALLOW_IN_REPO` | Set to `1` to allow `PR_RELAY_OPENCODE_BIN` to point at a binary **inside the repository under review**. Refused by default: that file is written by whoever wrote the diff. |
+| `PR_RELAY_ARGV_WARN_BYTES` | Size at which the relay warns that `qwen`/`agy` are being handed a large prompt as a command-line **argument**. Default `16000`. See below. |
+
+### How the prompt reaches each reviewer
+
+The relay builds **one document** — the prompt, with the diff fenced inside it in `--diff`
+mode — and hands it to each reviewer the only way that reviewer accepts:
+
+| Reviewer | Transport |
+|---|---|
+| `claude`, `cursor` | whole document on **stdin** (`-p` with no prompt argument) |
+| `codex` | whole document on **stdin** (`codex exec -`) |
+| `qwen` | `-p "$PROMPT"`, diff piped on stdin |
+| `agy` | whole document as an **argv** argument — it does not read a prompt from stdin |
+| `opencode` | attached file, reviewed in isolation from the repo |
+
+This matters on **Git Bash / MSYS**, where a large prompt in argv can make the `exec` of
+`timeout` itself fail with `EACCES`. That surfaces as:
+
+```
+! codex: no review — found but could not be executed (exit 126)
+  │ /usr/bin/timeout: Permission denied
+```
+
+which reads as a broken agent install and is not one — the agent never started. It is
+content-dependent rather than a simple length cap (a same-length filler string passes,
+and a 200 KB argv passes to an MSYS child), and the underlying MSYS cause is unidentified.
+Moving the document to stdin sidesteps it entirely, which is why every reviewer that can
+read stdin now does.
+
+`qwen` and `agy` still put a prompt in argv and remain exposed. The relay warns above
+`PR_RELAY_ARGV_WARN_BYTES` rather than refusing, since the limit does not apply on every
+platform. Note the remedies differ: `--diff` helps `qwen` (the diff moves into its pipe)
+and **hurts** `agy` (the diff moves into its argument).
 | `PR_RELAY_OPENCODE_BIN` | Path to the `opencode` binary. Any resolution that goes through `PATH` — implicit, or a **bare name** given here — refuses a binary found *inside the repository under review* (a `.` on your `PATH`, or a repo-local bin dir), since that file was written by the same person as the diff. A value **containing a `/`** that resolves inside the repo is refused too, unless `PR_RELAY_OPENCODE_ALLOW_IN_REPO=1`. The guard only applies inside a git worktree. Absolute paths, relative paths and bare `PATH` names all work — the value is resolved to an absolute path before use, because the reviewer runs from a different working directory. A leading `~` or `~/` **is** expanded (it reaches the variable as a literal character, so the shell never does it for you) — but only when `HOME` is set; the `~user/…` form is *not* supported, give a real path for that; otherwise the relay refuses rather than turning `~/bin/opencode` into `/bin/opencode`. Only needed for a non-standard install: the relay already finds it on `PATH` or at `~/.opencode/bin/opencode`. |
 
 > **Before pinning `PR_RELAY_OPENCODE_MODEL`:** free-tier models can log submitted

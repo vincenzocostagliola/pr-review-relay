@@ -407,9 +407,17 @@ assert_argv_safe() {
   [ "$n" -gt "$ARGV_WARN_BYTES" ] || return 0
   echo "  ! $1 gets a ${n}-byte prompt as a command-line ARGUMENT (it cannot take stdin here)." >&2
   echo "    On Git Bash/MSYS this can fail as exit 126 \"/usr/bin/timeout: Permission denied\"," >&2
-  echo "    which is an exec failure, not a broken $1. Use --diff mode, a smaller context" >&2
-  echo "    file, or drop $1 from --reviewers if it does. Raise PR_RELAY_ARGV_WARN_BYTES to" >&2
-  echo "    silence this." >&2
+  echo "    which is an exec failure, not a broken $1." >&2
+  # The remedies differ, and the wrong one makes it worse: --diff moves the diff OUT of
+  # qwen's argument and INTO its pipe, but for agy it moves the diff INTO the argument.
+  case "$1" in
+    qwen)        echo "    Try --diff (it pipes the diff to qwen instead of passing it), a smaller" >&2
+                 echo "    --context-file, or drop qwen from --reviewers." >&2;;
+    antigravity) echo "    --diff will NOT help here - it puts the diff in the same argument. Reduce" >&2
+                 echo "    the input (smaller --context-file, smaller PR) or drop antigravity from" >&2
+                 echo "    --reviewers on this platform." >&2;;
+  esac
+  echo "    Raise PR_RELAY_ARGV_WARN_BYTES to silence this." >&2
 }
 
 # $OPENCODE_BIN is already resolved (opencode_resolve_bin, near the top) so the same
