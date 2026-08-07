@@ -401,15 +401,20 @@ review_with() {
   # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
   Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
   errf="$(mktemp)"
-  # claude / codex / cursor / qwen all read the document from stdin: `-p` with no prompt
-  # argument for claude and cursor-agent, an explicit `-` for codex, and qwen's print mode
-  # is implied when stdin is not a TTY. agy is the exception — it does not read a prompt
-  # from stdin (see the note in review-local), so it still takes $AGENT_INPUT as an
-  # argument and remains the one reviewer exposed to the Windows argv limit.
+  # claude / codex / cursor read the document from stdin: `-p` with no prompt argument for
+  # claude and cursor-agent, an explicit `-` for codex.
+  #
+  # qwen and agy still take it as an argument, and so remain exposed to the argv failure
+  # above. Each for its own reason:
+  #   agy  — does not read a prompt from stdin at all (see the note in review-local).
+  #   qwen — `-p` is its documented print-mode contract (README, and test-fail-closed.sh
+  #          asserts it). Dropping the flag to feed stdin instead is plausible but was not
+  #          testable here (qwen is opt-in and not installed), and an untested change to a
+  #          reviewer's invocation is worse than a known limitation. Left alone deliberately.
   case "$name" in
     claude)       out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" claude -p 2>"$errf"); rc=$?;;
     codex)        out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access - 2>"$errf"); rc=$?;;
-    qwen)         out=$(printf '%s' "$AGENT_INPUT" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo 2>"$errf"); rc=$?;;
+    qwen)         out=$(QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$AGENT_INPUT" 2>"$errf"); rc=$?;;
     cursor)       out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
     antigravity)  out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$AGENT_INPUT" 2>"$errf"); rc=$?;;
     opencode)

@@ -873,8 +873,11 @@ LREPO="$WORK/localrepo"; git init -q -b main "$LREPO"
     && git checkout -qb feature && echo change >> file.txt && git add file.txt && git commit -qm feat )
 LHEAD=$(git -C "$LREPO" rev-parse HEAD)
 ln -sf "$(command -v node)" "$BIN/node" 2>/dev/null
-# reviewer stub that echoes the prompt it received, so we can see what it was told to do
-printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\n' > "$BIN/claude"; chmod +x "$BIN/claude"
+# Reviewer stub that echoes the prompt it received, so we can see what it was told to do.
+# The prompt now arrives on STDIN (claude is invoked as `claude -p` with no prompt
+# argument), so echo both: "$*" alone would print only the flags, and every content
+# assertion below would then be checking an empty prompt and passing for the wrong reason.
+printf '#!/usr/bin/env bash\nprintf "%%s" "$*"\ncat\n' > "$BIN/claude"; chmod +x "$BIN/claude"
 lc_run() { # sets $out/$rc; args: extra env assignments for the relay
   rm -rf "$WORK/cache"; mkdir -p "$WORK/cache"; rm -f "$WORK/sha_counter"
   out=$( cd "$LREPO" && env PATH="$BIN:$PATH" XDG_CACHE_HOME="$WORK/cache" GH_SHA_COUNTER="$WORK/sha_counter" \
