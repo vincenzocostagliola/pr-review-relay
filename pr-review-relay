@@ -397,6 +397,10 @@ fi
 # day. Not fatal: it is a real limit on some platforms and a non-issue on others, so warn
 # and let it run rather than refusing a review the machine may well be able to produce.
 ARGV_WARN_BYTES="${PR_RELAY_ARGV_WARN_BYTES:-16000}"
+# Validated like LINK_DIFF_FALLBACK_MAX_BYTES. A non-numeric value would make the
+# comparison below fail and return quietly — a diagnostic that silently stops diagnosing
+# is worse than none, since it reads as "no warning, so the size is fine".
+case "$ARGV_WARN_BYTES" in ''|*[!0-9]*) echo "invalid PR_RELAY_ARGV_WARN_BYTES: '$ARGV_WARN_BYTES' (want bytes)" >&2; exit 2;; esac
 assert_argv_safe() {
   case "$1" in qwen|antigravity) ;; *) return 0;; esac
   # wc -c, not ${#var}: in a UTF-8 locale Bash counts CHARACTERS, and the limit is on
