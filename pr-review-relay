@@ -399,11 +399,15 @@ fi
 ARGV_WARN_BYTES="${PR_RELAY_ARGV_WARN_BYTES:-16000}"
 assert_argv_safe() {
   case "$1" in qwen|antigravity) ;; *) return 0;; esac
+  # wc -c, not ${#var}: in a UTF-8 locale Bash counts CHARACTERS, and the limit is on
+  # bytes. The prompt that first triggered this was full of em dashes and §, where the
+  # two differ by enough to skip the warning on exactly the prompts most likely to fail.
   local n
   case "$1" in
-    qwen)        n=${#PROMPT};;
-    antigravity) n=${#AGENT_INPUT};;
+    qwen)        n=$(printf '%s' "$PROMPT"      | wc -c);;
+    antigravity) n=$(printf '%s' "$AGENT_INPUT" | wc -c);;
   esac
+  n=$((n))
   [ "$n" -gt "$ARGV_WARN_BYTES" ] || return 0
   echo "  ! $1 gets a ${n}-byte prompt as a command-line ARGUMENT (it cannot take stdin here)." >&2
   echo "    On Git Bash/MSYS this can fail as exit 126 \"/usr/bin/timeout: Permission denied\"," >&2

@@ -170,7 +170,7 @@ pr-review-relay --pr 47 --parallel                 # explicit PR, reviewers run 
 pr-review-relay --pr 47 --reviewers codex          # only one reviewer
 pr-review-relay --pr 47 --reviewers claude,agy     # pick specific reviewers
 pr-review-relay --context-file SPEC.md             # make every reviewer read & verify against SPEC.md
-pr-review-relay --diff                             # old behaviour: pipe the diff instead of a PR link
+pr-review-relay --diff                             # old behaviour: send the diff instead of a PR link
 pr-review-relay --dry-run                          # show what it would do, run no agents
 ```
 
@@ -208,7 +208,7 @@ mode — and hands it to each reviewer the only way that reviewer accepts:
 |---|---|
 | `claude`, `cursor` | whole document on **stdin** (`-p` with no prompt argument) |
 | `codex` | whole document on **stdin** (`codex exec -`) |
-| `qwen` | `-p "$PROMPT"`, diff piped on stdin |
+| `qwen` | `-p "$PROMPT"` always. In `--diff` mode the diff is piped on stdin; in `--link` mode there is nothing to pipe, so the embedded diff travels inside `$PROMPT` — i.e. in argv |
 | `agy` | whole document as an **argv** argument — it does not read a prompt from stdin |
 | `opencode` | attached file, reviewed in isolation from the repo |
 
@@ -436,7 +436,9 @@ Telling an agent to "fix and re-run" can spiral. Two layers keep it bounded:
    always comes from `gh pr diff` (authoritative, fork-safe) and is embedded as a **fallback** so a
    reviewer whose sandbox can't run `gh` still returns a review — but the fallback is **omitted for large
    diffs** (over `LINK_DIFF_FALLBACK_MAX_BYTES`, default 100000) so an oversized inline diff can't exceed
-   an agent's prompt limit. With **`--diff`** only the raw diff is sent. A **`--context-file`** is
+   an agent's prompt limit. With **`--diff`** the diff is sent instead of the PR link — fenced inside the
+   same single document, not as a raw stream (see
+   [how the prompt reaches each reviewer](#how-the-prompt-reaches-each-reviewer)). A **`--context-file`** is
    prepended so every reviewer verifies against it.
 3. Posts each review as a **collapsed** PR comment via `gh pr comment` (forum-style `<details>`),
    tagged per agent (🟣 Claude / 🟢 Codex /
