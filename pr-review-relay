@@ -301,7 +301,7 @@ fi
 # --- Build the review prompt -------------------------------------------------
 if [ "$MODE" = diff ]; then
   read -r -d '' BASE <<'P' || true
-You are reviewing a pull request. Review the diff (provided on stdin) for correctness
+You are reviewing a pull request. Review the diff (provided below) for correctness
 bugs, security issues, broken edge cases, and clear design/maintainability problems.
 You may read files in the current repo for context, but DO NOT modify anything.
 Be concise. Group findings by severity: Blocker / Should-fix / Nit.
@@ -363,6 +363,71 @@ if [ "$MODE" = link ]; then
   fi
 fi
 
+# Every reviewer gets ONE document on STDIN, never as an argv element. $PROMPT can carry an
+# embedded diff (up to LINK_DIFF_FALLBACK_MAX_BYTES, 100KB by default), and on Git Bash /
+# MSYS passing it as an argument kills the reviewer before the agent starts.
+#
+# The failure does NOT look like the argv limit you would expect. Measured on a 20,914-char
+# prompt: bash cannot exec /usr/bin/timeout at all, reporting EACCES —
+#
+#   pr-review-relay: line NNN: /usr/bin/timeout: Permission denied
+#
+# — which the reviewer loop maps to exit 126, "found but could not be executed", and which
+# reads as a broken agent install. It is neither E2BIG nor "Argument list too long", and it
+# is content-dependent rather than a plain length cap: a same-length string of filler passes,
+# 200KB of filler passes to an MSYS child, and the real prompt fails at 19,430 chars while
+# 19,429 passes. The underlying MSYS cause was not identified; the trigger and the fix were
+# established by bisection, and substituting a non-agent binary reproduces it exactly, which
+# is what rules the agents out. (Windows' documented ~32K command-line cap is a separate,
+# real limit that would bite a larger prompt — it is just not what fails first here.)
+#
+# Diff mode appends the diff here rather than piping it separately, so the two modes produce
+# the same single input document.
+if [ "$MODE" = diff ]; then
+  AGENT_INPUT=$(printf '%s\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
+  QWEN_FEED="$DIFF"        # qwen keeps the older split: -p "$PROMPT", diff down the pipe
+else
+  AGENT_INPUT="$PROMPT"
+  QWEN_FEED=""
+fi
+
+# qwen and agy still put a prompt in argv (see review_with). If that prompt is big enough to
+# trip the failure this change is about, say so plainly BEFORE the agent dies with a bare
+# 126 and a message about `timeout` — which is precisely the wild goose chase that cost a
+# day. Not fatal: it is a real limit on some platforms and a non-issue on others, so warn
+# and let it run rather than refusing a review the machine may well be able to produce.
+ARGV_WARN_BYTES="${PR_RELAY_ARGV_WARN_BYTES:-16000}"
+# Validated like LINK_DIFF_FALLBACK_MAX_BYTES. A non-numeric value would make the
+# comparison below fail and return quietly — a diagnostic that silently stops diagnosing
+# is worse than none, since it reads as "no warning, so the size is fine".
+case "$ARGV_WARN_BYTES" in ''|*[!0-9]*) echo "invalid PR_RELAY_ARGV_WARN_BYTES: '$ARGV_WARN_BYTES' (want bytes)" >&2; exit 2;; esac
+assert_argv_safe() {
+  case "$1" in qwen|antigravity) ;; *) return 0;; esac
+  # wc -c, not ${#var}: in a UTF-8 locale Bash counts CHARACTERS, and the limit is on
+  # bytes. The prompt that first triggered this was full of em dashes and §, where the
+  # two differ by enough to skip the warning on exactly the prompts most likely to fail.
+  local n
+  case "$1" in
+    qwen)        n=$(printf '%s' "$PROMPT"      | wc -c);;
+    antigravity) n=$(printf '%s' "$AGENT_INPUT" | wc -c);;
+  esac
+  n=$((n))
+  [ "$n" -gt "$ARGV_WARN_BYTES" ] || return 0
+  echo "  ! $1 gets a ${n}-byte prompt as a command-line ARGUMENT (it cannot take stdin here)." >&2
+  echo "    On Git Bash/MSYS this can fail as exit 126 \"/usr/bin/timeout: Permission denied\"," >&2
+  echo "    which is an exec failure, not a broken $1." >&2
+  # The remedies differ, and the wrong one makes it worse: --diff moves the diff OUT of
+  # qwen's argument and INTO its pipe, but for agy it moves the diff INTO the argument.
+  case "$1" in
+    qwen)        echo "    Try --diff (it pipes the diff to qwen instead of passing it), a smaller" >&2
+                 echo "    --context-file, or drop qwen from --reviewers." >&2;;
+    antigravity) echo "    --diff will NOT help here - it puts the diff in the same argument. Reduce" >&2
+                 echo "    the input (smaller --context-file, smaller PR) or drop antigravity from" >&2
+                 echo "    --reviewers on this platform." >&2;;
+  esac
+  echo "    Raise PR_RELAY_ARGV_WARN_BYTES to silence this." >&2
+}
+
 # $OPENCODE_BIN is already resolved (opencode_resolve_bin, near the top) so the same
 # value feeds both the `command -v` availability check in the reviewer loop and the
 # invocation in review_with(). It has to happen before that loop: resolving lazily
@@ -370,28 +435,33 @@ fi
 tool_for() { case "$1" in claude) echo claude;; codex) echo codex;; cursor) echo cursor-agent;; antigravity|agy) echo agy;; opencode) echo "$OPENCODE_BIN";; qwen) echo qwen;; *) echo "";; esac; }
 
 review_with() {
-  local name="$1" out="" feed="" rc=0 errf skey Name id
+  local name="$1" out="" rc=0 errf skey Name id
   skey="$(status_key "$name")"
   # Capitalize first letter — Bash 3.2-safe (no ${name^}, which is Bash 4+).
   Name="$(printf '%s' "${name:0:1}" | tr '[:lower:]' '[:upper:]')${name:1}"
   errf="$(mktemp)"
-  [ "$MODE" = diff ] && feed="$DIFF"   # only diff mode pipes the diff; link mode fetches it
+  # claude / codex / cursor take the WHOLE document on stdin, so nothing large reaches argv:
+  # `-p` with no prompt argument for claude and cursor-agent, an explicit `-` for codex.
+  #
+  # qwen and agy are NOT fixed by this change and keep exactly what they did before it:
+  #   qwen — `-p "$PROMPT"` with the diff piped in. `-p` is its documented print-mode
+  #          contract (README, and test-fail-closed.sh asserts it), and review-local shows
+  #          qwen reading stdin with `-p` present, so the flag stays and the bulk goes down
+  #          the pipe. Collapsing it to a single stdin document is plausible but untestable
+  #          here (qwen is opt-in and not installed), and an untested change to a reviewer's
+  #          invocation is worse than an unchanged limitation.
+  #   agy  — does not read a prompt from stdin at all (see the note in review-local), so it
+  #          has no alternative transport.
+  # Both therefore remain exposed to the argv failure described above whenever $PROMPT
+  # itself is large, which in link mode it can be. assert_argv_safe below turns that into a
+  # legible warning instead of the exit-126 mystery this whole change exists to explain.
+  assert_argv_safe "$name"
   case "$name" in
-    claude)       out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" claude -p "$PROMPT" 2>"$errf"); rc=$?;;
-    codex)        out=$(printf '%s' "$feed" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access "$PROMPT" 2>"$errf"); rc=$?;;
-    qwen)         out=$(printf '%s' "$feed" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
-    cursor)
-      if [ "$MODE" = diff ]; then
-        out=$(printf '%s\n\n%s' "$PROMPT" "$DIFF" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf")
-      else
-        out=$(printf '%s' "$PROMPT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf")
-      fi; rc=$?;;
-    antigravity)
-      if [ "$MODE" = diff ]; then
-        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$(printf '%s\n\n%s' "$PROMPT" "$DIFF")" 2>"$errf")
-      else
-        out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$PROMPT" 2>"$errf")
-      fi; rc=$?;;
+    claude)       out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" claude -p 2>"$errf"); rc=$?;;
+    codex)        out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" codex exec -s danger-full-access - 2>"$errf"); rc=$?;;
+    qwen)         out=$(printf '%s' "$QWEN_FEED" | QWEN_CODE_SUPPRESS_YOLO_WARNING=1 timeout "$AGENT_TIMEOUT" qwen --safe-mode --approval-mode yolo -p "$PROMPT" 2>"$errf"); rc=$?;;
+    cursor)       out=$(printf '%s' "$AGENT_INPUT" | timeout "$AGENT_TIMEOUT" cursor-agent -p --trust --mode=ask 2>"$errf"); rc=$?;;
+    antigravity)  out=$(timeout "$AGY_OUTER_TIMEOUT" agy --dangerously-skip-permissions --print-timeout "${AGENT_TIMEOUT}s" -p "$AGENT_INPUT" 2>"$errf"); rc=$?;;
     opencode)
       out=$(opencode_review "$ATTACH_DIR" "$DIFF" "$CONTEXT_BLOCK" \
               "PR #$PR in $REPO ${PR_URL:+($PR_URL)}" "$errf" "$AGENT_TIMEOUT")
