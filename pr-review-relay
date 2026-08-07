@@ -364,10 +364,25 @@ if [ "$MODE" = link ]; then
 fi
 
 # Every reviewer gets ONE document on STDIN, never as an argv element. $PROMPT can carry an
-# embedded diff (up to LINK_DIFF_FALLBACK_MAX_BYTES, 100KB by default) and Windows caps a
-# process command line at ~32K chars, so passing it as an argument kills every reviewer with
-# "Argument list too long" before the agent even starts. Diff mode appends the diff here
-# rather than piping it separately, so the two modes produce the same single input document.
+# embedded diff (up to LINK_DIFF_FALLBACK_MAX_BYTES, 100KB by default), and on Git Bash /
+# MSYS passing it as an argument kills the reviewer before the agent starts.
+#
+# The failure does NOT look like the argv limit you would expect. Measured on a 20,914-char
+# prompt: bash cannot exec /usr/bin/timeout at all, reporting EACCES —
+#
+#   pr-review-relay: line NNN: /usr/bin/timeout: Permission denied
+#
+# — which the reviewer loop maps to exit 126, "found but could not be executed", and which
+# reads as a broken agent install. It is neither E2BIG nor "Argument list too long", and it
+# is content-dependent rather than a plain length cap: a same-length string of filler passes,
+# 200KB of filler passes to an MSYS child, and the real prompt fails at 19,430 chars while
+# 19,429 passes. The underlying MSYS cause was not identified; the trigger and the fix were
+# established by bisection, and substituting a non-agent binary reproduces it exactly, which
+# is what rules the agents out. (Windows' documented ~32K command-line cap is a separate,
+# real limit that would bite a larger prompt — it is just not what fails first here.)
+#
+# Diff mode appends the diff here rather than piping it separately, so the two modes produce
+# the same single input document.
 if [ "$MODE" = diff ]; then
   AGENT_INPUT=$(printf '%s\n\n```diff\n%s\n```\n' "$PROMPT" "$DIFF")
 else
